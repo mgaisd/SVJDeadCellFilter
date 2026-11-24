@@ -1,0 +1,11 @@
+# dead-cell plots: ignore everything except the filter definitions
+plots_deadcell/**
+!plots_deadcell/**/
+!plots_deadcell/**/outlier_centers_*.txt
+plots_deadcell_ntuples/**
+!plots_deadcell_ntuples/**/
+!plots_deadcell_ntuples/**/outlier_centers_*.txt
+
+cache_DataMC/
+cache_DataMC_noResiduals/
+cache_ntuples/

@@ -1,134 +1,108 @@
 # SVJDeadCellFilter
 
-This repo is meant to create a custom filter for artificial MET due to ECAL dead cells. Similar custom filters have been made for s-channel and t-channel analyses, but not for scouting.
+Custom filter against artificial MET from ECAL dead cells for the SVJ **scouting** analysis.
+Similar custom filters exist for the s-channel and t-channel analyses, but not for scouting.
 
 The code should work with the [SVJ conda environment](https://github.com/jniedzie/SVJanalysis_wiki/wiki/Creating-SVJ-virtual-environment).
+Requirements: `uproot numpy matplotlib mplhep awkward tqdm`, plus the XRootD client (`xrdfs`) for remote file access.
 
-## DeadCellStudy.py
+## How the filter works
 
-### Overview
+1. Fill eta-phi maps of the **subleading good AK4 jet** (50 x 50 bins over |eta| < 2.4, full phi) for QCD MC and data.
+2. Normalise each eta slice and flag bins more than `N_SIGMA = 4` standard deviations above the slice mean as hot/dead-cell bins.
+3. Write the bin centres to `outlier_centers_{year}.txt`. The `source` column says whether a bin was flagged in data, MC or both.
+4. Veto an event if its subleading AK4 jet satisfies `deta^2 + dphi^2 < 0.028816 * 0.35` (≈ 0.0101) with respect to any of these centres.
+   Here 0.028816 is the bin size squared, and the factor 0.35 was chosen by `radiusOptimization.py`.
 
-`DeadCellStudy.py` is a Python script that analyzes jet distributions in eta-phi space to identify potential dead cells or problematic regions in the CMS calorimeter. The script processes ROOT files from either Monte Carlo simulations or real collision data and creates 2D distribution maps.
+For 2018 the pre-HEM and HEM periods are derived separately, and `outlier_centers_2018.txt` is their union.
+2016 has no skims, so it is derived from the unskimmed ntuples with the s-channel scouting pre-selection applied on the fly.
 
-### What it does
+## Filter files (the actual result)
 
-- **Reads ROOT files**: Accesses files remotely via XRootD or locally
-- **Extracts jet kinematics**: Retrieves eta and phi coordinates for AK4 jets
-- **Applies proper weighting**: 
-  - For MC: Cross-section weighted to integrated luminosity
-  - For data: Simple event counting
-- **Creates 2D histograms**: Shows distribution of jets in eta-phi space
-- **Generates plots**: Publication-quality CMS-style plots in PNG and PDF formats
-- **Parallel processing**: Efficiently processes multiple files simultaneously
-
-The script analyzes both leading and subleading jets separately, which can help identify regions with abnormal jet activity that might indicate detector issues.
-
-### Requirements
-
-```bash
-pip install uproot numpy matplotlib mplhep awkward tqdm
+```
+plots_deadcell/2016/outlier_centers_2016.txt
+plots_deadcell/2017/outlier_centers_2017.txt
+plots_deadcell/2018/outlier_centers_2018.txt          # union, use this one
+plots_deadcell/2018/outlier_centers_2018_preHEM.txt
+plots_deadcell/2018/outlier_centers_2018_HEM.txt
+plots_deadcell_ntuples/2017/outlier_centers_2017.txt  # 2017 re-derived from ntuples (cross-check only)
 ```
 
-You also need XRootD client tools installed on your system for remote file access:
-```bash
-# On Ubuntu/Debian
-sudo apt-get install xrootd-client
+Format: header lines start with `#`, then one `eta_center  phi_center  source` per line.
+The same files are used in production in
+[SVJProcessing](https://github.com/CMS-SVJ-scouting/SVJProcessing) under `data/dead_cells/`, through
+`apply_scouting_phi_spike_filter()` in `analysis_configs/sequences_s_channel_scouting.py`.
+2016APV uses the 2016 file.
 
-# On RHEL/CentOS
-sudo yum install xrootd-client
+### Minimal example of applying the filter
+
+```python
+import numpy as np, awkward as ak
+
+def load_centers(path):
+    c = np.loadtxt(path, usecols=(0, 1), comments="#", ndmin=2)
+    return c[:, 0], c[:, 1]
+
+def dead_cell_mask(jet_eta, jet_phi, eta_c, phi_c, rad=0.028816 * 0.35):
+    """True for events that PASS the filter. jet_eta/phi: good AK4 jets (jagged)."""
+    eta = ak.to_numpy(ak.fill_none(ak.pad_none(jet_eta, 2)[:, 1], 99.0))  # <2 jets: always pass
+    phi = ak.to_numpy(ak.fill_none(ak.pad_none(jet_phi, 2)[:, 1], 99.0))  # <2 jets: always pass
+    deta = eta[:, None] - eta_c[None, :]
+    dphi = (phi[:, None] - phi_c[None, :] + np.pi) % (2 * np.pi) - np.pi
+    return ~np.any(deta**2 + dphi**2 < rad, axis=1)
 ```
 
-### Usage
+## Scripts
 
-#### Basic Usage
+Run them in the order below. Input paths (KIT dCache skims and ntuples) and the golden JSON directory are set at the top of each script.
+Edit `base_path` / `GOLDEN_JSON_DIR` if you don't have access to them.
 
-**Process Monte Carlo samples (default):**
-```bash
-python DeadCellStudy.py
-```
-
-**Process real data:**
-```bash
-python DeadCellStudy.py --data
-```
-
-#### Selecting Years
-
-**Process a specific year:**
-```bash
-python DeadCellStudy.py --years 2017
-```
-
-**Process multiple years:**
-```bash
-python DeadCellStudy.py --years 2016 2017 2018
-```
-
-**Combine options (data + specific years):**
-```bash
-python DeadCellStudy.py --data --years 2017
-```
-
-#### Command-Line Options
-
-- `--data`: Process real collision data instead of Monte Carlo simulation
-- `--years YEAR [YEAR ...]`: Specify which year(s) to process (default: 2017)
-
-#### Help
+### 1. `DeadCellStudy.py`: derive the filter
 
 ```bash
-python DeadCellStudy.py --help
+python DeadCellStudy.py                       # 2017 (default)
+python DeadCellStudy.py --years 2017 2018     # 2018 is split into preHEM/HEM automatically
+python DeadCellStudy.py --years 2016          # 2016 data from ntuples (cached in cache_ntuples/, resumes if interrupted)
+python DeadCellStudy.py --years 2016 --vfp-split          # derive preVFP/postVFP separately, write their union
+python DeadCellStudy.py --years 2017 --from-ntuples       # re-derive from ntuples (output: plots_deadcell_ntuples/)
 ```
 
-### Configuration
+Ntuple-mode options: `--max-files N` (testing), `--workers N` (parallel readers, default 4) and `--allow-missing` (write output even if some files failed).
 
-Before running, you may need to adjust the configuration in the script:
+Output in `plots_deadcell/{year}/`: raw, normalised and outlier-marked eta-phi maps for the leading and subleading jet (MC and data), plus `outlier_centers_*.txt`.
 
-1. **File paths**: Update `MC_YEARS` and `DATA_YEARS` dictionaries with correct paths to your datasets
-2. **Dataset names**: Modify `MC_DATASET_NAMES` or `DATA_DATASET_NAMES` to match your file structure
-3. **Jet branches**: If your ROOT files use different branch names, update `JET_ETA_BRANCH` and `JET_PHI_BRANCH`
-4. **Binning**: Adjust `ETA_BINS` and `PHI_BINS` for different histogram granularity
-5. **Parallel workers**: Change `FILE_WORKERS` to control the number of parallel file readers
+### 2. `FilterEtaPhiMaps.py`: plot the filter and its efficiency
 
-### Output
+```bash
+python FilterEtaPhiMaps.py                    # 2017 and 2018 (default)
+python FilterEtaPhiMaps.py --years 2018
+python FilterEtaPhiMaps.py --years 2016       # data only, uses the DeadCellStudy ntuple cache
+```
 
-The script creates a `plots_deadcell/` directory with the following files:
+Reads the `outlier_centers_*.txt` files. It produces normalised subleading-jet eta-phi maps for QCD and data with the vetoed regions drawn as circles
+(and the HEM region for 2018 post-HEM), plus filter efficiencies for QCD and all signal points.
+Output: `plots_filter/{year}/`, with efficiencies in `efficiencies_{year}.csv`.
 
-- `etaphi_ak4_lead_YEAR_mc.png/pdf`: Leading jet distributions for MC
-- `etaphi_ak4_sublead_YEAR_mc.png/pdf`: Subleading jet distributions for MC  
-- `etaphi_ak4_lead_YEAR_data.png/pdf`: Leading jet distributions for data
-- `etaphi_ak4_sublead_YEAR_data.png/pdf`: Subleading jet distributions for data
+### 3. Working-point optimisation (optional)
 
-Each plot shows:
-- 2D histogram of jet eta vs phi
-- Color scale indicating jet density (weighted for MC, raw counts for data)
-- CMS style formatting
-- Year and luminosity information
+```bash
+python nSigmaOptimization.py      # scan N_SIGMA (2 to 7.5), FOM = sqrt(2((S+B)ln(1+S/B) - S))  -> plots_nSigmaOpt/
+python radiusOptimization.py      # scan veto-radius factor (0.05 to 1.2)                     -> plots_radiusOpt/
+```
 
-### Example Workflow
+Both rebuild the QCD map on the fly from the skims, and they cover 2017 and 2018 pre-HEM.
 
-1. **Check MC distributions first:**
-   ```bash
-   python DeadCellStudy.py --years 2017
-   ```
+### 4. `CompareDeadCellFilters.py`: cross-check two filter lists
 
-2. **Compare with data:**
-   ```bash
-   python DeadCellStudy.py --data --years 2017
-   ```
+```bash
+python CompareDeadCellFilters.py --year 2017
+python CompareDeadCellFilters.py --year 2017 --ref A.txt --new B.txt --labels A B --out outdir
+```
 
-3. **Look for discrepancies** in the eta-phi plots that might indicate dead cells or detector issues
+By default it compares the skim-based list (`plots_deadcell/`) with the ntuple-based one (`plots_deadcell_ntuples/`).
+It reports common and unique bins, an eta-phi overlay and the fraction of vetoed events. Run `DeadCellStudy.py --from-ntuples` first, since this needs `cache_ntuples/{year}`.
 
-### Troubleshooting
+## Notes
 
-- **XRootD connection issues**: Verify you can access the remote storage with `xrdfs`
-- **Missing branches**: Check that your ROOT files contain the required branches (`Jet_eta`, `Jet_phi`)
-- **Memory issues**: Reduce `FILE_WORKERS` if you encounter memory problems
-- **No files found**: Verify the paths in `MC_YEARS` or `DATA_YEARS` dictionaries
-
-### Notes
-
-- The script uses parallel processing to speed up file reading - progress bars show real-time status
-- MC samples are weighted by cross-section and luminosity for proper normalization
-- Data samples use simple event counting (unit weights)
-- The script skips files that cannot be read and continues processing remaining files
+- These jobs read many files over XRootD. Run them on a portal or batch node, not on a desktop machine.
+- Plots and caches are git-ignored. Only the `outlier_centers_*.txt` files are tracked.
